@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>課堂文字雲</title>
+  <style>
+    body { font-family: system-ui, "Noto Sans TC", sans-serif;
+           max-width: 720px; margin: 0 auto; padding: 16px; line-height: 1.6; }
+    input, button { font-size: 16px; padding: 10px; box-sizing: border-box;
+                    border: 1px solid #ccc; border-radius: 6px; }
+    #row { display: flex; gap: 8px; flex-wrap: wrap; }
+    #seat { width: 90px; }
+    #word { flex: 1; min-width: 160px; }
+    button { cursor: pointer; background: #1a73e8; color: #fff; border: 0; }
+    button:disabled { opacity: .5; cursor: wait; }
+    #status { min-height: 1.4em; color: #1a7f37; }
+    #cloudWrap { text-align: center; }
+    #cloud { width: 100%; max-width: 680px; height: 320px;
+             background: #f9fafb; border: 1px solid #eee; border-radius: 8px; }
+    ul { padding: 0; }
+    li { list-style: none; border-bottom: 1px solid #eee; padding: 8px 0; }
+    .meta { color: #888; font-size: 13px; }
+    #toggle { background: #5f6368; }
+  </style>
+</head>
+<body>
+  <h2>課堂文字雲</h2>
+
+  <div id="row">
+    <input id="seat" placeholder="座號" maxlength="6" inputmode="numeric">
+    <input id="word" placeholder="輸入一個詞（例：光合作用）" maxlength="20">
+    <button id="send">送出</button>
+  </div>
+  <p id="status"></p>
+
+  <button id="toggle">顯示文字雲</button>
+  <div id="cloudWrap" hidden>
+    <canvas id="cloud"></canvas>
+  </div>
+
+  <h3>最新發言</h3>
+  <ul id="list"></ul>
+
+  <img id="qrcode" alt="QR Code" style="max-width:180px; margin-top:16px;">
+
+  <script type="module">
+    import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+
+    const SUPABASE_URL = 'https://puyvmbmzjvnnkdmwpgor.supabase.co'
+    const SUPABASE_KEY = 'sb_publishable_5w86Gml5h6MLQZisvQOj9A_SX8k0etM'
+
+    const supabase = createClient(SUPABASE_URL, SUPABASE_KEY)
+
+    const $ = id => document.getElementById(id)
+    let all = []   // 全部詞彙（含計數）
+    let shown = false
+
+    function show(msg) { $('status').textContent = msg || '' }
+
+    async function send() {
+      const word = $('word').value.trim()
+      if (!word) { show('請輸入一個詞'); return }
+      const seat = $('seat').value.trim() || '✕'
+      $('send').disabled = true
+      show('送出中…')
+      const { error } = await supabase
+        .from('wordcloud')
+        .insert({ seat_no: seat, word })
+      $('send').disabled = false
+      if (error) {
+        show('送出失敗：' + error.message)
+        return false
+      }
+      $('word').value = ''
+      if ($('word').value) {} // noop
+      show('已送出！')
+      return true
+    }
+
+    async function load() {
+      const { data, error } = await supabase
+        .from('wordcloud')
+        .select('id, seat_no, word, created_at')
+        .order('created_at', { ascending: false })
+        .limit(200)
+      if (error) { console.error(error); return [] }
+      all = data || []
+      render()
+      return data
+    }
+
+    function render() {
+      const ul = $('list')
+      ul.innerHTML = ''
+      all.forEach(r => {
+        const li = document.createElement('li')
+        const meta = document.createElement('div')
+        meta.className = 'meta'
+        meta.textContent = '座號 ' + r.seat_no + '　' + fmt(r.created_at)
+        const body = document.createElement('div')
+        body.textContent = r.word          // 文字安全：不當 HTML
+        li.appendChild(meta)
+        li.appendChild(body)
+        ul.appendChild(li)
+      })
+      drawCloud()
+    }
+
+    function fmt(ts) {
+      try { return new Date(ts).toLocaleString('zh-TW', { hour12: false }) }
+      catch (e) { return String(ts) }
+    }
+
+    function counts() {
+      const m = {}
+      all.forEach(r => { m[r.word] = (m[r.word] || 0) + 1 })
+      return Object.entries(m).map(([w, c]) => [w, c])
+    }
+
+    function drawCloud() {
+      const canvas = $('cloud')
+      if (!shown || !canvas) return
+      try {
+        window.WordCloud(canvas, {
+          list: counts(),
+          weightFactor: 14,
+          color: () => ['#1a73e8','#ea4335','#f9ab00','#188038','#7b1fa2','#5f6368'][Math.floor(Math.random()*6)],
+          backgroundColor: '#f9fafb',
+          gridSize: 8
+        })
+      } catch (e) { console.error('wordcloud:', e) }
+    }
+
+    $('send').addEventListener('click', send)
+    $('word').addEventListener('keydown', e => { if (e.key === 'Enter') send() })
+    $('toggle').addEventListener('click', () => {
+      shown = !shown
+      $('cloudWrap').hidden = !shown
+      $('toggle').textContent = shown ? '隱藏文字雲' : '顯示文字雲'
+      if (shown) {
+        drawCloud()
+        setTimeout(drawCloud, 300)   // 等容器展開
+      }
+    })
+
+    // 別人送出 → 我不重新整理也自動出現
+    supabase
+      .channel('wordcloud-live')
+      .on('postgres_changes',
+          { event: 'INSERT', schema: 'public', table: 'wordcloud' },
+          payload => {
+            all.unshift(payload.new)
+            render()
+            show('收到新發言：' + payload.new.word)
+          })
+      .subscribe()
+
+    // 頁面上的 QR（把目前網址印成 QR，學生掃了就能進來）
+    const qr = $('qrcode')
+    qr.src = 'https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=' +
+             encodeURIComponent(location.href)
+
+    load()
+  </script>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/wordcloud2.js/1.0.2/wordcloud2.min.js"></script>
+</body>
+</html>
